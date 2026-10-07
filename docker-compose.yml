@@ -1,0 +1,123 @@
+# ╔═══════════════════════════════════════════════════════════════════════╗
+# ║  AnimeHub – Unified Docker Compose (Release)                        ║
+# ║  Ports: 32300 (front) · 32301 (api) · 32303 (db) · 32304 (translate) · 32305 (upscale)║
+# ╚═══════════════════════════════════════════════════════════════════════╝
+#
+# Usage:
+#   docker compose up -d --build
+#   docker compose down
+
+volumes:
+  libretranslate_models:
+    name: animehub_libretranslate_models
+  libretranslate_cache:
+    name: animehub_libretranslate_cache
+  postgres_data:
+    name: animehub_postgres_data
+
+services:
+  # ── PostgreSQL ────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: animehub-postgres
+    environment:
+      - POSTGRES_USER=animehub
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      - POSTGRES_DB=AnimeHubDb
+    ports:
+      - "32303:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U animehub -d AnimeHubDb"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # ── LibreTranslate ────────────────────────────────────────────────────
+  libretranslate:
+    image: libretranslate/libretranslate:latest
+    container_name: animehub-libretranslate
+    user: "0:0"
+    stdin_open: true
+    tty: true
+    command: ["--load-only", "pt,en,es,zh"]
+    environment:
+      - LT_LOAD_ONLY=pt,en,es,zh
+    ports:
+      - "32304:5000"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; urllib.request.urlopen('http://localhost:5000/languages', timeout=10); sys.exit(0)",
+        ]
+      interval: 30s
+      timeout: 30s
+      retries: 20
+      start_period: 60s
+    volumes:
+      - libretranslate_models:/home/libretranslate/.local/share/argos-translate:rw
+      - libretranslate_cache:/home/libretranslate/.local/cache:rw
+
+  # ── Backend API (.NET 10) ─────────────────────────────────────────────
+  api:
+    build:
+      context: ./Backend/SiteAnimes_Api
+      dockerfile: ./src/AnimeHub.Api/Dockerfile
+    container_name: animehub-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      realesrgan:
+        condition: service_healthy
+    environment:
+      - ConnectionStrings__DefaultConnection=Host=postgres;Port=5432;Database=AnimeHubDb;Username=animehub;Password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      - Jwt__Key=${JWT_KEY:?Set JWT_KEY}
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:80
+      - Translation__BaseUrl=http://libretranslate:5000
+      - Translation__TimeoutSeconds=60
+      - ImageUpscale__ServiceUrl=http://realesrgan:8000
+      - ImageUpscale__TimeoutSeconds=420
+      - Cors__AllowedOrigins__0=http://localhost:32300
+      - Serilog__MinimumLevel__Default=Warning
+    ports:
+      - "32301:80"
+    restart: unless-stopped
+
+  # ── Real-ESRGAN (CPU/GPU auto fallback) ─────────────────────────────
+  realesrgan:
+    build:
+      context: ./Backend/SiteAnimes_Api/docker/realesrgan-service
+    container_name: realesrgan
+    environment:
+      - UPSCALE_MODE=auto
+      - ESRGAN_TIMEOUT=420
+    ports:
+      - "32305:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ── Frontend (Flutter Web + nginx) ────────────────────────────────────
+  frontend:
+    build:
+      context: ./Frontend/EverAnimes-Flutter_FrontEnd
+      dockerfile: Dockerfile
+      args:
+        API_BASE_URL: ""
+    container_name: animehub-frontend
+    depends_on:
+      - api
+    ports:
+      - "32300:80"
+    restart: unless-stopped

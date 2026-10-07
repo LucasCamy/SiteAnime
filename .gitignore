@@ -1,0 +1,11 @@
+Frontend/EverAnimes-Flutter_FrontEnd/screenshot_details.png
+Frontend/EverAnimes-Flutter_FrontEnd/screenshot_details_new.png
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+**/appsettings.Local.json
+**/appsettings.*.local.json
+**/secrets.json
+clones/
